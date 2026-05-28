@@ -2391,3 +2391,5 @@ function EventTypesConfig({ data, save }) {
         Os pesos definem quantos pontos cada presença vale no ranking. Crie, edite ou remova tipos de evento conforme necessário. As alterações refletem automaticamente no ranking de presenças.
       </div>
     </div>
+  );
+}
