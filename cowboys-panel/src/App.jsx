@@ -2218,6 +2218,7 @@ function StaffTab({ data, save }) {
   };
 
   return (
+    <>
     <div className="card">
       <div className="card-t">
         <span>Gerenciar Staff</span>
@@ -2273,6 +2274,7 @@ function StaffTab({ data, save }) {
 
     {/* EVENT TYPES CONFIG */}
     <EventTypesConfig data={data} save={save} />
+    </>
   );
 }
 
