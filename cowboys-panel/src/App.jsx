@@ -24,16 +24,32 @@ function toArr(val) {
 // Ensure all fields exist and are proper arrays
 function sanitize(d) {
   if (!d || typeof d !== "object") return { ...DEFAULT_DATA };
-  const members = toArr(d.members).map(m => ({
-    ...m,
-    id: m.id || Date.now(),
-    name: m.name || "",
-    class: m.class || "WR",
-    level: m.level || 100,
-    cultivo: m.cultivo || "Nenhum",
-    whatsapp: m.whatsapp || "",
-    obs: m.obs || "",
-  }));
+  const usedPins = new Set();
+  let pinsGenerated = false;
+  const genPin = () => {
+    let p;
+    let tries = 0;
+    do { p = String(Math.floor(1000 + Math.random() * 9000)); tries++; } while (usedPins.has(p) && tries < 50);
+    usedPins.add(p);
+    pinsGenerated = true;
+    return p;
+  };
+  const members = toArr(d.members).map(m => {
+    let pin = m.pin;
+    if (pin && !usedPins.has(pin)) usedPins.add(pin);
+    else if (!pin) pin = genPin();
+    return {
+      ...m,
+      id: m.id || Date.now(),
+      name: m.name || "",
+      class: m.class || "WR",
+      level: m.level || 100,
+      cultivo: m.cultivo || "Nenhum",
+      whatsapp: m.whatsapp || "",
+      obs: m.obs || "",
+      pin,
+    };
+  });
   const events = toArr(d.events).map(e => ({
     ...e,
     id: e.id || Date.now(),
@@ -41,6 +57,10 @@ function sanitize(d) {
     type: e.type || "TW",
     date: e.date || "",
     present: toArr(e.present),
+    selfConfirmed: toArr(e.selfConfirmed),
+    declined: toArr(e.declined),
+    openForConfirm: e.openForConfirm || false,
+    linkedWeekId: e.linkedWeekId || null,
   }));
   const twWeeks = toArr(d.twWeeks).map(w => ({
     ...w,
@@ -48,6 +68,8 @@ function sanitize(d) {
     label: w.label || "",
     confirmed: toArr(w.confirmed),
     declined: toArr(w.declined),
+    openForConfirm: w.openForConfirm || false,
+    linkedEventId: w.linkedEventId || null,
   }));
   const lentAccounts = toArr(d.lentAccounts).map(a => ({
     ...a,
@@ -71,11 +93,12 @@ function sanitize(d) {
       delivered: toArr(d.insignias?.delivered || []),
     },
     eventTypes: toArr(d.eventTypes || []),
+    _pinsGenerated: pinsGenerated,
   };
 }
 
 // Safe class color (fallback for unknown classes)
-function cc(cls) { return CLASS_COLORS[cls] || "#8A7A70"; }
+function cc(cls) { return CLASS_COLORS[cls] || "#7A7668"; }
 
 // Dynamic event types helpers
 function getEventTypes(data) {
@@ -174,12 +197,29 @@ function LoginScreen({ onLogin, onPlayerView }) {
 }
 
 /* ═══════════════ MAIN APP ═══════════════ */
+const SESSION_KEY = "cowboys_session";
+
 export default function App() {
-  const [auth, setAuth] = useState(null);
+  const [auth, setAuth] = useState(() => {
+    try {
+      const saved = localStorage.getItem(SESSION_KEY);
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
   const [playerView, setPlayerView] = useState(false);
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("members");
   const [loading, setLoading] = useState(true);
+
+  // Persist auth across reloads
+  const handleLogin = (authData) => {
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(authData)); } catch {}
+    setAuth(authData);
+  };
+  const handleLogout = () => {
+    try { localStorage.removeItem(SESSION_KEY); } catch {}
+    setAuth(null);
+  };
 
   const isActive = auth || playerView;
 
@@ -187,8 +227,18 @@ export default function App() {
     if (!isActive) return;
     const timeout = setTimeout(() => { setData(DEFAULT_DATA); setLoading(false); }, 4000);
 
+    // Only staff (admin/staff) can persist generated pins; player view is read-mostly
+    const persistIfNeeded = (sanitized) => {
+      if (sanitized._pinsGenerated && auth) {
+        const { _pinsGenerated, ...clean } = sanitized;
+        storage.save(DATA_KEY, clean);
+      }
+    };
+
     const unsubscribe = storage.subscribe(DATA_KEY, (val) => {
-      setData(sanitize(val));
+      const s = sanitize(val);
+      setData(s);
+      persistIfNeeded(s);
       setLoading(false);
       clearTimeout(timeout);
     });
@@ -196,7 +246,11 @@ export default function App() {
     (async () => {
       try {
         const s = await storage.get(DATA_KEY);
-        if (s?.value) setData(sanitize(JSON.parse(s.value)));
+        if (s?.value) {
+          const sn = sanitize(JSON.parse(s.value));
+          setData(sn);
+          persistIfNeeded(sn);
+        }
         else setData({ ...DEFAULT_DATA });
       } catch { setData({ ...DEFAULT_DATA }); }
       setLoading(false);
@@ -214,11 +268,13 @@ export default function App() {
       // Keep last 200 logs
       updated = { ...d, logs: [entry, ...logs].slice(0, 200) };
     }
+    // Never persist internal flags
+    const { _pinsGenerated, ...clean } = updated;
     setData(updated);
-    await storage.save(DATA_KEY, updated);
+    await storage.save(DATA_KEY, clean);
   }, [auth]);
 
-  if (!isActive) return <LoginScreen onLogin={setAuth} onPlayerView={()=>setPlayerView(true)} />;
+  if (!isActive) return <LoginScreen onLogin={handleLogin} onPlayerView={()=>setPlayerView(true)} />;
 
   if (loading || !data) return (
     <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"var(--bg)",color:"var(--gold)",fontFamily:"'Oswald',sans-serif",letterSpacing:4,fontSize:".9rem"}}>
@@ -226,7 +282,7 @@ export default function App() {
     </div>
   );
 
-  if (playerView) return <PlayerView data={data} onBack={()=>{setPlayerView(false);setData(null);setLoading(true);}} />;
+  if (playerView) return <PlayerView data={data} save={save} onBack={()=>{setPlayerView(false);setData(null);setLoading(true);}} />;
 
   const tabs = [
     { id:"members", label:"Membros", icon:Ico.users },
@@ -234,7 +290,6 @@ export default function App() {
     { id:"tw", label:"Controle TW", icon:Ico.shield },
     { id:"pts", label:"Montar PTs", icon:Ico.swords },
     { id:"accounts", label:"Contas", icon:Ico.key },
-    { id:"insignias", label:"Insígnias", icon:Ico.medal },
     ...(auth.isAdmin ? [{ id:"logs", label:"Logs", icon:Ico.clock }] : []),
     ...(auth.isAdmin ? [{ id:"staff", label:"Staff", icon:Ico.edit }] : []),
   ];
@@ -249,7 +304,7 @@ export default function App() {
             {data.members.length} membros · logado como <strong style={{color:"var(--gold)"}}>{auth.user}</strong>
             {auth.isAdmin && <span className="badge b-gold" style={{marginLeft:6,fontSize:".5rem",verticalAlign:"middle"}}>ADMIN</span>}
           </span>
-          <button className="logout-btn" onClick={()=>{setAuth(null);setData(null);setLoading(true);setTab("members");}}>Sair</button>
+          <button className="logout-btn" onClick={()=>{handleLogout();setData(null);setLoading(true);setTab("members");}}>Sair</button>
         </div>
       </header>
       <nav className="tabs">
@@ -264,7 +319,6 @@ export default function App() {
       {tab==="tw" && <TWTab data={data} save={save}/>}
       {tab==="pts" && <PTBuilderTab data={data} save={save}/>}
       {tab==="accounts" && <AccountsTab data={data} save={save}/>}
-      {tab==="insignias" && <InsigniasTab data={data} save={save}/>}
       {tab==="logs" && auth.isAdmin && <LogsTab data={data} save={save}/>}
       {tab==="staff" && auth.isAdmin && <StaffTab data={data} save={save}/>}
     </div>
@@ -421,7 +475,7 @@ function MembersTab({ data, save }) {
     setForm(blank); setShow(false);
   };
 
-  const startEdit = (m) => { setForm({name:m.name,class:m.class,level:m.level,cultivo:m.cultivo,whatsapp:m.whatsapp,obs:m.obs||""}); setEditId(m.id); setShow(false); };
+  const startEdit = (m) => { setForm({name:m.name,class:m.class,level:m.level,cultivo:m.cultivo,whatsapp:m.whatsapp,obs:m.obs||"",pin:m.pin}); setEditId(m.id); setShow(false); };
   const remove = (id) => {
     const m = data.members.find(x => x.id === id);
     save({
@@ -456,7 +510,7 @@ function MembersTab({ data, save }) {
 
   const exportExcel = () => {
     if (data.members.length === 0) return;
-    const rows = data.members.map(m => ({ Nome:m.name, Classe:m.class, "Nível":m.level, Cultivo:m.cultivo, WhatsApp:m.whatsapp||"", Obs:m.obs||"" }));
+    const rows = data.members.map(m => ({ Nome:m.name, Classe:m.class, "Nível":m.level, Cultivo:m.cultivo, WhatsApp:m.whatsapp||"", PIN:m.pin||"", Obs:m.obs||"" }));
     const ws = XLSX.utils.json_to_sheet(rows);
     ws["!cols"] = [{wch:20},{wch:8},{wch:8},{wch:22},{wch:18},{wch:12}];
     const wb = XLSX.utils.book_new();
@@ -677,6 +731,7 @@ function MembersTab({ data, save }) {
               <th style={{cursor:"pointer",userSelect:"none"}} onClick={()=>handleSort("level")}>Nível <SortIco col="level"/></th>
               <th style={{cursor:"pointer",userSelect:"none"}} onClick={()=>handleSort("cultivo")}>Cultivo <SortIco col="cultivo"/></th>
               <th>WhatsApp</th>
+              <th>PIN</th>
               <th>Obs</th>
               {!selectMode && <th></th>}
             </tr></thead>
@@ -704,6 +759,7 @@ function MembersTab({ data, save }) {
                       <td><input type="number" value={form.level} onChange={e=>setForm({...form,level:+e.target.value})} style={{width:60,padding:"4px 6px",fontSize:".85rem"}}/></td>
                       <td><select value={form.cultivo} onChange={e=>setForm({...form,cultivo:e.target.value})} style={{padding:"4px 4px",fontSize:".75rem"}}>{CULTIVOS.map(c=><option key={c}>{c}</option>)}</select></td>
                       <td><input value={form.whatsapp} onChange={e=>setForm({...form,whatsapp:e.target.value})} placeholder="(99) 99999-9999" style={{width:"100%",padding:"4px 6px",fontSize:".82rem"}}/></td>
+                      <td style={{fontFamily:"monospace",fontSize:".9rem",fontWeight:700,color:"var(--gold)",letterSpacing:2}}>{form.pin||"—"}</td>
                       <td><input value={form.obs||""} onChange={e=>setForm({...form,obs:e.target.value})} placeholder="Ex: SEC" style={{width:"100%",padding:"4px 6px",fontSize:".82rem"}}/></td>
                       <td style={{whiteSpace:"nowrap"}}>
                         <button className="btn btn-s btn-green" onClick={submit} style={{marginRight:4}}>{Ico.check}</button>
@@ -717,6 +773,7 @@ function MembersTab({ data, save }) {
                       <td>{m.level}</td>
                       <td><span className="badge b-gold">{m.cultivo}</span></td>
                       <td style={{fontSize:".85rem",color:"var(--text-d)"}}>{m.whatsapp||"—"}</td>
+                      <td style={{fontFamily:"monospace",fontSize:".9rem",fontWeight:700,color:"var(--gold)",letterSpacing:2}}>{m.pin||"—"}</td>
                       <td style={{fontSize:".82rem",color:m.obs?"var(--gold)":"var(--text-d)",fontWeight:m.obs?600:400}}>{m.obs||"—"}</td>
                       {!selectMode && <td style={{whiteSpace:"nowrap"}}>
                         <button className="btn btn-s" onClick={()=>startEdit(m)} style={{marginRight:4}}>{Ico.edit}</button>
@@ -752,7 +809,7 @@ function ClassChart({ members }) {
     if(!active||!payload?.length) return null;
     const d=payload[0].payload;
     return (
-      <div style={{background:"#1A1413",border:"1px solid #3D2820",borderRadius:4,padding:"8px 12px",fontFamily:"'Oswald',sans-serif",fontSize:".75rem"}}>
+      <div style={{background:"#141418",border:"1px solid #3A3428",borderRadius:4,padding:"8px 12px",fontFamily:"'Oswald',sans-serif",fontSize:".75rem"}}>
         <div style={{color:d.fill,fontWeight:700,letterSpacing:1}}>{d.name}</div>
         <div style={{color:"#E0D8C8",fontSize:".85rem"}}>{d.full}</div>
         <div style={{color:"#C4453A",marginTop:2}}>{d.count} membro{d.count!==1?"s":""}</div>
@@ -769,8 +826,8 @@ function ClassChart({ members }) {
       <div style={{width:"100%",height:200}}>
         <ResponsiveContainer>
           <BarChart data={chartData} margin={{top:5,right:5,bottom:5,left:-15}}>
-            <XAxis dataKey="name" tick={{fill:"#C4453A",fontFamily:"'Oswald',sans-serif",fontSize:11,letterSpacing:1}} axisLine={{stroke:"#3D2820"}} tickLine={false}/>
-            <YAxis tick={{fill:"#8A7A70",fontSize:11}} axisLine={false} tickLine={false} allowDecimals={false}/>
+            <XAxis dataKey="name" tick={{fill:"#C4453A",fontFamily:"'Oswald',sans-serif",fontSize:11,letterSpacing:1}} axisLine={{stroke:"#3A3428"}} tickLine={false}/>
+            <YAxis tick={{fill:"#7A7668",fontSize:11}} axisLine={false} tickLine={false} allowDecimals={false}/>
             <Tooltip content={<Tip/>} cursor={{fill:"rgba(201,168,76,0.05)"}}/>
             <Bar dataKey="count" radius={[3,3,0,0]} maxBarSize={45}>
               {chartData.map((e,i)=><Cell key={i} fill={e.fill} fillOpacity={e.count===0?0.15:0.85} stroke={e.fill} strokeWidth={e.count===0?1:0} strokeDasharray={e.count===0?"3 3":"0"}/>)}
@@ -948,10 +1005,46 @@ function EventsTab({ data, save }) {
   const [editForm, setEditForm] = useState({name:"",type:""});
   const blank = {name:"",type:getEventTypeNames(data)[0],date:"",present:[]};
   const [form, setForm] = useState(blank);
-  const submit = () => { if(!form.name.trim()||!form.date) return; save({...data,events:[...data.events,{...form,id:Date.now()}]}, `Criou evento "${form.name}" (${form.type})`); setForm(blank); setShow(false); };
-  const removeEv = (id) => { const ev = data.events.find(e=>e.id===id); save({...data,events:data.events.filter(e=>e.id!==id)}, `Removeu evento "${ev?.name||id}"`); };
+  const submit = () => {
+    if(!form.name.trim()||!form.date) return;
+    const eventId = Date.now();
+    const newEvent = {...form, id: eventId};
+    let updated = {...data, events:[...data.events, newEvent]};
+    // If it's a TW-type event, auto-create a linked TW week for PT planning
+    if (form.type === "TW") {
+      const dateObj = new Date(form.date + "T12:00");
+      const dd = String(dateObj.getDate()).padStart(2,"0");
+      const mm = String(dateObj.getMonth()+1).padStart(2,"0");
+      const weekLabel = `${form.name} — ${dd}/${mm}`;
+      newEvent.linkedWeekId = eventId; // same id links them
+      updated = {
+        ...updated,
+        events: updated.events.map(e => e.id === eventId ? newEvent : e),
+        twWeeks: [{ id: eventId, label: weekLabel, confirmed: [], declined: [], linkedEventId: eventId }, ...(data.twWeeks||[])],
+      };
+    }
+    save(updated, `Criou evento "${form.name}" (${form.type})${form.type==="TW" ? " + semana de TW vinculada" : ""}`);
+    setForm(blank); setShow(false);
+  };
+  const removeEv = (id) => {
+    const ev = data.events.find(e=>e.id===id);
+    // Remove linked TW week too
+    const newPTs = {...(data.twPTs||{})};
+    if (ev?.linkedWeekId) delete newPTs[ev.linkedWeekId];
+    save({
+      ...data,
+      events:data.events.filter(e=>e.id!==id),
+      twWeeks: (data.twWeeks||[]).filter(w => w.id !== ev?.linkedWeekId),
+      twPTs: newPTs,
+    }, `Removeu evento "${ev?.name||id}"${ev?.linkedWeekId ? " + semana de TW vinculada" : ""}`);
+  };
   const togglePresent = (evId,mId) => {
     save({...data,events:data.events.map(e=>{ if(e.id!==evId) return e; const p=e.present||[]; return {...e,present:p.includes(mId)?p.filter(x=>x!==mId):[...p,mId]}; })});
+  };
+  const toggleEventConfirmOpen = (evId) => {
+    const ev = data.events.find(e=>e.id===evId);
+    save({...data,events:data.events.map(e=>e.id!==evId?e:{...e,openForConfirm:!e.openForConfirm})},
+      `${ev?.openForConfirm ? "Fechou" : "Abriu"} confirmação do evento "${ev?.name}"`);
   };
   const startEditEv = (ev) => { setEditEvId(ev.id); setEditForm({name:ev.name,type:ev.type}); };
   const saveEditEv = () => {
@@ -1072,9 +1165,14 @@ function EventsTab({ data, save }) {
                       <span style={{fontFamily:"'Oswald',sans-serif",fontWeight:700,fontSize:".9rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{ev.name}</span>
                       <span className={`badge ${typeBadge[ev.type]||"b-blue"}`} style={{flexShrink:0}}>{ev.type} ×{getEventWeight(data, ev.type)||1}</span>
                     </div>
-                    <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0,flexWrap:"wrap"}}>
+                      {ev.openForConfirm && <span className="badge b-green" style={{flexShrink:0}}>🔓 Aberto</span>}
+                      {(ev.declined||[]).length > 0 && <span className="badge b-red" style={{flexShrink:0}}>{(ev.declined||[]).length} não vão</span>}
                       <span style={{fontSize:".75rem",color:"var(--text-d)"}}>{d.getDate()} {months[d.getMonth()]}</span>
                       <span style={{fontSize:".75rem",fontWeight:600,color:presCount>0?"var(--green-l)":"var(--text-d)"}}>{presCount}/{data.members.length}</span>
+                      <button className={`btn btn-s ${ev.openForConfirm ? "btn-d" : "btn-green"}`} onClick={e=>{e.stopPropagation();toggleEventConfirmOpen(ev.id);}} title={ev.openForConfirm ? "Fechar autoconfirmação" : "Abrir para players confirmarem via PIN"}>
+                        {ev.openForConfirm ? "🔒" : "🔓 Abrir"}
+                      </button>
                       <button className="btn btn-s" onClick={e=>{e.stopPropagation();startEditEv(ev);}} title="Editar evento">{Ico.edit}</button>
                       <button className="btn btn-s btn-d" onClick={e=>{e.stopPropagation();removeEv(ev.id);}}>{Ico.trash}</button>
                     </div>
@@ -1112,7 +1210,12 @@ function TWTab({ data, save }) {
   const [sortCol, setSortCol] = useState("name"); // name, class
   const [sortDir, setSortDir] = useState("asc");
   const createWeek = () => { if(!weekLabel.trim()) return; save({...data,twWeeks:[{id:Date.now(),label:weekLabel,confirmed:[],declined:[]},...(data.twWeeks||[])]}, `Criou semana TW "${weekLabel}"`); setWeekLabel(""); setShow(false); };
-  const removeWeek = (id) => { const w = (data.twWeeks||[]).find(x=>x.id===id); save({...data,twWeeks:(data.twWeeks||[]).filter(w=>w.id!==id)}, `Removeu semana TW "${w?.label||id}"`); };
+  const removeWeek = (id) => {
+    const w = (data.twWeeks||[]).find(x=>x.id===id);
+    const newPTs = {...(data.twPTs||{})};
+    delete newPTs[id];
+    save({...data,twWeeks:(data.twWeeks||[]).filter(w=>w.id!==id),twPTs:newPTs}, `Removeu semana TW "${w?.label||id}"`);
+  };
   const toggleExpand = (id) => setExpanded(e=>({...e,[id]:!e[id]}));
   const togglePlayer = (wId,mId,type) => {
     save({...data,twWeeks:(data.twWeeks||[]).map(w=>{
@@ -1195,6 +1298,7 @@ function TWTab({ data, save }) {
                     <span style={{fontFamily:"'Oswald',sans-serif",fontWeight:700,fontSize:".85rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{week.label}</span>
                   </div>
                   <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",flexShrink:0}}>
+                    {week.linkedEventId && <span className="badge b-blue" title="Vinculada a um evento de TW — confirmações via PIN alimentam esta semana">🔗 Evento</span>}
                     <span className="badge b-green">{conf.length} vão</span>
                     <span className="badge b-red">{decl.length} não vão</span>
                     <span className="badge b-gold">{pending.length} pend.</span>
@@ -1250,6 +1354,49 @@ function TWTab({ data, save }) {
                           :sortMembers(declM).map(m=>(<div key={m.id} className="tw-player no" onClick={()=>togglePlayer(week.id,m.id,"decline")}><span style={{color:"var(--red-l)",marginRight:4}}>●</span><span style={{flex:1}}>{m.name}</span><span style={{fontSize:".7rem"}}>{m.class}</span></div>))}
                       </div>
                     </div>
+
+                    {/* Saved PT formations for this TW */}
+                    {(() => {
+                      const savedPTs = toArr((data.twPTs || {})[week.id] || []).filter(pt => (pt.players || []).length > 0);
+                      if (savedPTs.length === 0) return null;
+                      return (
+                        <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid var(--border-g)"}}>
+                          <div style={{fontFamily:"'Oswald',sans-serif",fontSize:".6rem",letterSpacing:2,textTransform:"uppercase",color:"var(--gold)",marginBottom:10,display:"flex",alignItems:"center",gap:8}}>
+                            {Ico.swords} Formação Salva ({savedPTs.length} {savedPTs.length===1?"PT":"PTs"})
+                          </div>
+                          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))",gap:8}}>
+                            {savedPTs.map(pt => {
+                              const ptPlayers = (pt.players || []).map(id => data.members.find(m => m.id === id)).filter(Boolean);
+                              const ptClassCounts = ptPlayers.reduce((a,m)=>{a[m.class]=(a[m.class]||0)+1;return a;},{});
+                              return (
+                                <div key={pt.id} style={{background:"var(--bg)",border:"1px solid var(--border)",borderRadius:4,padding:"10px 12px"}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                                    <span style={{fontFamily:"'Oswald',sans-serif",fontWeight:700,fontSize:".75rem",letterSpacing:1,color:"var(--gold)",textTransform:"uppercase"}}>{pt.name}</span>
+                                    <span style={{fontSize:".65rem",color:"var(--text-d)",fontFamily:"'Oswald',sans-serif"}}>{ptPlayers.length}/10</span>
+                                  </div>
+                                  {Object.keys(ptClassCounts).length > 0 && (
+                                    <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:6}}>
+                                      {Object.entries(ptClassCounts).map(([cls,cnt])=>(
+                                        <span key={cls} style={{fontSize:".5rem",padding:"1px 5px",borderRadius:2,background:cc(cls)+"18",color:cc(cls),border:`1px solid ${cc(cls)}40`,fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontWeight:600}}>{cnt}x {cls}</span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                                    {ptPlayers.map(m=>(
+                                      <div key={m.id} style={{display:"flex",alignItems:"center",gap:5,fontSize:".8rem"}}>
+                                        <span style={{width:7,height:7,borderRadius:1,background:cc(m.class),display:"inline-block",flexShrink:0}}/>
+                                        <span style={{fontWeight:600,flex:1}}>{m.name}</span>
+                                        <span style={{fontSize:".6rem",color:cc(m.class),fontFamily:"'Oswald',sans-serif",letterSpacing:1}}>{m.class}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -1265,6 +1412,8 @@ function TWTab({ data, save }) {
 function PTBuilderTab({ data, save }) {
   const [selectedWeek, setSelectedWeek] = useState(null);
   const [dragPlayer, setDragPlayer] = useState(null);
+  const [classFilter, setClassFilter] = useState([]);
+  const [poolSearch, setPoolSearch] = useState("");
 
   const weeks = data.twWeeks || [];
   const pts = data.twPTs || {};
@@ -1337,6 +1486,18 @@ function PTBuilderTab({ data, save }) {
   const confirmed = getConfirmed();
   const unassigned = getUnassigned();
 
+  // Filter unassigned by class and search
+  const toggleClassFilter = (c) => {
+    setClassFilter(prev => prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]);
+  };
+  const filteredUnassigned = unassigned.filter(m => {
+    if (classFilter.length > 0 && !classFilter.includes(m.class)) return false;
+    if (poolSearch && !m.name.toLowerCase().includes(poolSearch.toLowerCase())) return false;
+    return true;
+  });
+  // Class counts within unassigned pool
+  const poolClassCounts = unassigned.reduce((a, m) => { a[m.class] = (a[m.class] || 0) + 1; return a; }, {});
+
   // Class composition for a PT
   const getClassCount = (players) => {
     const counts = {};
@@ -1390,15 +1551,53 @@ function PTBuilderTab({ data, save }) {
 
               {/* Unassigned pool */}
               <div style={{marginBottom:16,background:"var(--bg-i)",border:"1px solid var(--border)",borderRadius:4,padding:14}}>
-                <div style={{fontFamily:"'Oswald',sans-serif",fontSize:".65rem",letterSpacing:2,textTransform:"uppercase",color:"var(--gold)",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <span>Jogadores Disponíveis ({unassigned.length})</span>
+                <div style={{fontFamily:"'Oswald',sans-serif",fontSize:".65rem",letterSpacing:2,textTransform:"uppercase",color:"var(--gold)",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span>Jogadores Disponíveis ({filteredUnassigned.length}{classFilter.length > 0 || poolSearch ? ` de ${unassigned.length}` : ""})</span>
                   <button className="btn" onClick={createPT}>{Ico.plus} Nova PT</button>
                 </div>
-                {unassigned.length === 0 ? (
-                  <div style={{fontSize:".8rem",color:"var(--text-d)",fontStyle:"italic",padding:8}}>Todos os jogadores já estão alocados em PTs.</div>
+
+                {/* Class filter chips */}
+                <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10,alignItems:"center"}}>
+                  {CLASSES.filter(c => poolClassCounts[c] > 0).map(c => {
+                    const active = classFilter.includes(c);
+                    return (
+                      <button
+                        key={c}
+                        onClick={() => toggleClassFilter(c)}
+                        style={{
+                          display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:3,cursor:"pointer",
+                          background: active ? cc(c) + "28" : "var(--bg)",
+                          border: `1px solid ${active ? cc(c) : "var(--border)"}`,
+                          fontFamily:"'Oswald',sans-serif",fontSize:".65rem",fontWeight:700,letterSpacing:1,
+                          color: active ? cc(c) : "var(--text-d)",transition:"all .15s"
+                        }}
+                      >
+                        <span style={{width:8,height:8,borderRadius:1,background:cc(c),display:"inline-block"}}/>
+                        {c}
+                        <span style={{fontSize:".7rem",opacity:.8}}>{poolClassCounts[c]}</span>
+                      </button>
+                    );
+                  })}
+                  {classFilter.length > 0 && (
+                    <button onClick={() => setClassFilter([])} style={{padding:"4px 10px",borderRadius:3,cursor:"pointer",background:"rgba(155,44,44,.1)",border:"1px solid rgba(155,44,44,.3)",color:"var(--red-l)",fontFamily:"'Oswald',sans-serif",fontSize:".6rem",letterSpacing:1,textTransform:"uppercase"}}>
+                      ✗ Limpar
+                    </button>
+                  )}
+                  <input
+                    value={poolSearch}
+                    onChange={e => setPoolSearch(e.target.value)}
+                    placeholder="Buscar..."
+                    style={{marginLeft:"auto",padding:"4px 10px",fontSize:".8rem",maxWidth:140}}
+                  />
+                </div>
+
+                {filteredUnassigned.length === 0 ? (
+                  <div style={{fontSize:".8rem",color:"var(--text-d)",fontStyle:"italic",padding:8}}>
+                    {unassigned.length === 0 ? "Todos os jogadores já estão alocados em PTs." : "Nenhum jogador com esse filtro."}
+                  </div>
                 ) : (
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {unassigned.map(m => (
+                    {filteredUnassigned.map(m => (
                       <div
                         key={m.id}
                         draggable
@@ -1406,11 +1605,11 @@ function PTBuilderTab({ data, save }) {
                         onDragEnd={() => setDragPlayer(null)}
                         style={{
                           display:"flex",alignItems:"center",gap:6,padding:"6px 10px",
-                          background:"var(--bg)",border:"1px solid var(--border)",borderRadius:3,
+                          background:"var(--bg)",border:`1px solid ${cc(m.class)}44`,borderRadius:3,
                           cursor:"grab",fontSize:".85rem",transition:"all .2s",userSelect:"none"
                         }}
-                        onMouseOver={e=>e.currentTarget.style.borderColor="var(--gold-d)"}
-                        onMouseOut={e=>e.currentTarget.style.borderColor="var(--border)"}
+                        onMouseOver={e=>e.currentTarget.style.borderColor=cc(m.class)}
+                        onMouseOut={e=>e.currentTarget.style.borderColor=cc(m.class)+"44"}
                       >
                         <span style={{width:8,height:8,borderRadius:1,background:cc(m.class),display:"inline-block"}}/>
                         <span style={{fontWeight:600}}>{m.name}</span>
@@ -1571,10 +1770,67 @@ function PTBuilderTab({ data, save }) {
   );
 }
 
-/* ═══════════════ PLAYER VIEW (READ-ONLY) ═══════════════ */
-function PlayerView({ data, onBack }) {
+/* ═══════════════ PLAYER VIEW (READ-ONLY + PIN CONFIRM) ═══════════════ */
+function PlayerView({ data, save, onBack }) {
   const [search, setSearch] = useState("");
-  const [viewTab, setViewTab] = useState("ranking");
+  const [viewTab, setViewTab] = useState("confirmar");
+  const [pinInput, setPinInput] = useState("");
+  const [me, setMe] = useState(null);
+  const [pinErr, setPinErr] = useState("");
+
+  const identifyByPin = (pin) => {
+    const found = data.members.find(m => m.pin === pin.trim());
+    if (found) { setMe(found); setPinErr(""); setViewTab("confirmar"); }
+    else setPinErr("PIN não encontrado. Verifique com a staff.");
+  };
+
+  // Player confirms attendance — counts as presence directly
+  const playerConfirm = (eventId) => {
+    if (!me) return;
+    const ev = (data.events||[]).find(e=>e.id===eventId);
+    const linkedWeekId = ev?.linkedWeekId;
+    const alreadyPresent = (ev?.present||[]).includes(me.id);
+    save({...data,
+      events:(data.events||[]).map(e=>{
+        if(e.id!==eventId) return e;
+        const p=e.present||[];
+        const dec=(e.declined||[]).filter(x=>x!==me.id);
+        return {...e, present: alreadyPresent ? p.filter(x=>x!==me.id) : [...p, me.id], declined: dec};
+      }),
+      twWeeks: linkedWeekId ? (data.twWeeks||[]).map(w=>{
+        if(w.id!==linkedWeekId) return w;
+        const conf=w.confirmed||[]; const decl=w.declined||[];
+        if(alreadyPresent){
+          return {...w, confirmed: conf.filter(x=>x!==me.id)};
+        }
+        return {...w, confirmed: conf.includes(me.id)?conf:[...conf,me.id], declined: decl.filter(x=>x!==me.id)};
+      }) : (data.twWeeks||[]),
+    });
+  };
+
+  // Player declines the event ("não vou")
+  const playerDecline = (eventId) => {
+    if (!me) return;
+    const ev = (data.events||[]).find(e=>e.id===eventId);
+    const linkedWeekId = ev?.linkedWeekId;
+    const alreadyDeclined = (ev?.declined||[]).includes(me.id);
+    save({...data,
+      events:(data.events||[]).map(e=>{
+        if(e.id!==eventId) return e;
+        const dec=e.declined||[];
+        const p=(e.present||[]).filter(x=>x!==me.id);
+        return {...e, present: p, declined: alreadyDeclined ? dec.filter(x=>x!==me.id) : [...dec, me.id]};
+      }),
+      twWeeks: linkedWeekId ? (data.twWeeks||[]).map(w=>{
+        if(w.id!==linkedWeekId) return w;
+        const conf=(w.confirmed||[]).filter(x=>x!==me.id); const decl=w.declined||[];
+        if(alreadyDeclined){
+          return {...w, declined: decl.filter(x=>x!==me.id), confirmed: conf};
+        }
+        return {...w, declined: decl.includes(me.id)?decl:[...decl,me.id], confirmed: conf};
+      }) : (data.twWeeks||[]),
+    });
+  };
 
   const totalEvents = (data.events || []).length;
   const maxPossiblePts = (data.events || []).reduce((s, e) => s + (getEventWeight(data, e.type) || 1), 0);
@@ -1595,10 +1851,14 @@ function PlayerView({ data, onBack }) {
   const weeks = data.twWeeks || [];
   const ins = data.insignias || { queue: [], delivered: [] };
 
+  // Keep 'me' fresh with latest data
+  const meFresh = me ? data.members.find(m => m.id === me.id) : null;
+  const openEvents = (data.events || []).filter(e => e.openForConfirm).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+
   const tabs = [
+    { id: "confirmar", label: me ? "✓ Confirmar" : "🔑 Entrar" },
     { id: "ranking", label: "Presenças" },
     { id: "tw", label: "TW" },
-    { id: "insignias", label: "Insígnias" },
   ];
 
   return (
@@ -1619,6 +1879,102 @@ function PlayerView({ data, onBack }) {
           </button>
         ))}
       </nav>
+
+      {/* CONFIRMAR TAB */}
+      {viewTab === "confirmar" && (
+        <div>
+          {!me ? (
+            <div className="card" style={{maxWidth:420,margin:"0 auto"}}>
+              <div className="card-t"><span>🔑 Acesso do Membro</span></div>
+              <div style={{fontSize:".85rem",color:"var(--text-d)",marginBottom:14,lineHeight:1.6}}>
+                Digite seu <strong style={{color:"var(--gold)"}}>PIN pessoal</strong> (4 dígitos) para confirmar presença nos eventos. Peça o seu PIN para a staff caso não saiba.
+              </div>
+              {pinErr && <div style={{color:"var(--red-l)",fontSize:".85rem",marginBottom:10,padding:"8px 12px",background:"rgba(155,44,44,.08)",borderRadius:3}}>{pinErr}</div>}
+              <input
+                value={pinInput}
+                onChange={e=>{ setPinInput(e.target.value.replace(/\D/g,"").slice(0,4)); setPinErr(""); }}
+                onKeyDown={e=>e.key==="Enter"&&identifyByPin(pinInput)}
+                placeholder="0000"
+                style={{width:"100%",textAlign:"center",fontSize:"2rem",fontFamily:"monospace",letterSpacing:12,padding:"12px",marginBottom:12}}
+                inputMode="numeric"
+              />
+              <button className="btn" style={{width:"100%",justifyContent:"center",padding:12}} onClick={()=>identifyByPin(pinInput)}>
+                {Ico.check} Acessar
+              </button>
+            </div>
+          ) : (
+            <div>
+              {/* Member greeting */}
+              <div className="card" style={{marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                <div>
+                  <div style={{fontSize:".7rem",color:"var(--text-d)",fontFamily:"'Oswald',sans-serif",letterSpacing:2,textTransform:"uppercase"}}>Bem-vindo</div>
+                  <div style={{fontFamily:"'Oswald',sans-serif",fontSize:"1.4rem",fontWeight:700,color:"var(--gold)",display:"flex",alignItems:"center",gap:8}}>
+                    {meFresh?.name}
+                    <span className="badge" style={{background:cc(meFresh?.class)+"22",color:cc(meFresh?.class),border:`1px solid ${cc(meFresh?.class)}55`}}>{meFresh?.class}</span>
+                  </div>
+                </div>
+                <button className="btn btn-d btn-s" onClick={()=>{setMe(null);setPinInput("");setViewTab("confirmar");}}>Sair</button>
+              </div>
+
+              {/* Open events for confirmation */}
+              {openEvents.length === 0 ? (
+                <div className="card"><div className="empty">Nenhum evento aberto para confirmação no momento. Aguarde a staff liberar.</div></div>
+              ) : (
+                openEvents.map(ev => {
+                  const isPresent = (ev.present||[]).includes(meFresh?.id);
+                  const isDeclined = (ev.declined||[]).includes(meFresh?.id);
+                  const evDate = ev.date ? new Date(ev.date+"T12:00") : null;
+                  const months=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+                  return (
+                    <div key={ev.id} className="card" style={{marginBottom:12}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6,marginBottom:4}}>
+                        <span style={{fontFamily:"'Oswald',sans-serif",fontWeight:700,fontSize:"1.1rem",color:"var(--gold)"}}>{ev.name}</span>
+                        <span className="badge b-gold">{ev.type}</span>
+                      </div>
+                      {evDate && <div style={{fontSize:".78rem",color:"var(--text-d)",marginBottom:12}}>{evDate.getDate()} {months[evDate.getMonth()]}</div>}
+
+                      {isPresent ? (
+                        <div>
+                          <div style={{marginBottom:10,padding:"12px",borderRadius:4,fontSize:".95rem",fontWeight:700,textAlign:"center",background:"rgba(56,121,74,.15)",color:"var(--green-l)",border:"1px solid rgba(56,121,74,.3)"}}>
+                            ⚔️ Contamos com você!
+                          </div>
+                          <button onClick={()=>playerConfirm(ev.id)} style={{width:"100%",padding:"10px",borderRadius:4,cursor:"pointer",fontFamily:"'Oswald',sans-serif",fontSize:".8rem",fontWeight:600,letterSpacing:1,textTransform:"uppercase",background:"rgba(155,44,44,.06)",border:"1px solid rgba(155,44,44,.25)",color:"var(--red-l)"}}>
+                            Cancelar confirmação
+                          </button>
+                        </div>
+                      ) : isDeclined ? (
+                        <div>
+                          <div style={{marginBottom:10,padding:"12px",borderRadius:4,fontSize:".9rem",fontWeight:600,textAlign:"center",background:"rgba(155,44,44,.1)",color:"var(--red-l)",border:"1px solid rgba(155,44,44,.3)"}}>
+                            Você marcou que não vai
+                          </div>
+                          <button onClick={()=>playerConfirm(ev.id)} style={{width:"100%",padding:"12px",borderRadius:4,cursor:"pointer",fontFamily:"'Oswald',sans-serif",fontSize:".85rem",fontWeight:700,letterSpacing:1,textTransform:"uppercase",background:"rgba(56,121,74,.1)",border:"1.5px solid rgba(56,121,74,.35)",color:"var(--green-l)"}}>
+                            ✓ Mudei de ideia, vou participar
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{display:"flex",gap:10}}>
+                          <button
+                            onClick={()=>playerConfirm(ev.id)}
+                            style={{flex:1,padding:"14px",borderRadius:4,cursor:"pointer",fontFamily:"'Oswald',sans-serif",fontSize:".85rem",fontWeight:700,letterSpacing:1,textTransform:"uppercase",transition:"all .2s",background:"rgba(56,121,74,.1)",border:"1.5px solid rgba(56,121,74,.35)",color:"var(--green-l)"}}
+                          >
+                            ✓ Vou participar
+                          </button>
+                          <button
+                            onClick={()=>playerDecline(ev.id)}
+                            style={{flex:1,padding:"14px",borderRadius:4,cursor:"pointer",fontFamily:"'Oswald',sans-serif",fontSize:".85rem",fontWeight:700,letterSpacing:1,textTransform:"uppercase",transition:"all .2s",background:"rgba(155,44,44,.06)",border:"1.5px solid rgba(155,44,44,.3)",color:"var(--red-l)"}}
+                          >
+                            ✗ Não vou
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* RANKING TAB */}
       {viewTab === "ranking" && (
@@ -1686,63 +2042,6 @@ function PlayerView({ data, onBack }) {
               </div>
             )
           }
-        </div>
-      )}
-
-      {/* INSIGNIAS TAB */}
-      {viewTab === "insignias" && (
-        <div>
-          {/* Rules */}
-          <div className="card" style={{marginBottom:14}}>
-            <div className="card-t"><span>Regras — Insígnias Intrépidas (35k Fama)</span></div>
-            {["Ter 6 provas.","Participar de todos eventos.","Disponibilizar as contas em caso de ausência (responsabilidade da staff).","Ter no mínimo 5 presenças.","Em caso de empate = sorteio entre os players."].map((r,i)=>(
-              <div key={i} style={{display:"flex",gap:10,padding:"6px 8px",fontSize:".85rem",alignItems:"flex-start"}}>
-                <span style={{fontFamily:"'Oswald',sans-serif",fontSize:".7rem",fontWeight:700,color:"var(--gold)",flexShrink:0,width:20,textAlign:"center"}}>{i+1}.</span>
-                <span style={{color:"var(--text)",lineHeight:1.5}}>{r}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Queue */}
-          <div className="card" style={{marginBottom:14}}>
-            <div className="card-t"><span>Fila de Solicitação ({(ins.queue||[]).length})</span></div>
-            {(ins.queue||[]).length === 0 ? <div className="empty">Fila vazia.</div>
-              : <div className="tbl"><table>
-                <thead><tr><th>#</th><th>Nome</th><th>Classe</th><th>Arma</th><th>Desde</th></tr></thead>
-                <tbody>
-                  {(ins.queue||[]).map((q,idx)=>(
-                    <tr key={q.id}>
-                      <td style={{fontFamily:"'Oswald',sans-serif",fontWeight:700,color:"var(--gold)",textAlign:"center",fontSize:"1rem"}}>{idx+1}º</td>
-                      <td style={{fontWeight:600}}>{q.name}</td>
-                      <td><span className="badge" style={{background:cc(q.class)+"22",color:cc(q.class),border:`1px solid ${cc(q.class)}55`}}>{q.class}</span></td>
-                      <td style={{color:"var(--gold)",fontWeight:600}}>{q.weapon||"—"}</td>
-                      <td style={{fontSize:".82rem",color:"var(--text-d)"}}>{q.addedAt}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table></div>
-            }
-          </div>
-
-          {/* Delivered */}
-          <div className="card">
-            <div className="card-t"><span>Armas Entregues ({(ins.delivered||[]).length})</span></div>
-            {(ins.delivered||[]).length === 0 ? <div className="empty">Nenhuma arma entregue ainda.</div>
-              : <div className="tbl"><table>
-                <thead><tr><th>Nome</th><th>Classe</th><th>Arma</th><th>Entregue em</th></tr></thead>
-                <tbody>
-                  {(ins.delivered||[]).map(d=>(
-                    <tr key={d.id} style={{opacity:.75}}>
-                      <td style={{fontWeight:600}}>{d.name}</td>
-                      <td><span className="badge" style={{background:cc(d.class)+"22",color:cc(d.class),border:`1px solid ${cc(d.class)}55`}}>{d.class}</span></td>
-                      <td style={{color:"var(--gold)",fontWeight:600}}>{d.weapon||"—"}</td>
-                      <td style={{fontSize:".82rem",color:"var(--green-l)",fontWeight:600}}>{d.deliveredAt}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table></div>
-            }
-          </div>
         </div>
       )}
 

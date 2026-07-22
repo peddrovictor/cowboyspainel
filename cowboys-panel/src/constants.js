@@ -1,13 +1,15 @@
-export const CLASSES = ["WR","MG","WB","WF","EA","EP","MC","PSY"];
+export const CLASSES = ["WR","MG","WB","WF","EA","EP","MC","PSY","TM","RT","MS","SK"];
 
 export const CLASS_LABELS = {
   WR:"Warrior",MG:"Magician",WB:"Werebeast",WF:"Werefox",
-  EA:"Elf Archer",EP:"Elf Principe",MC:"Mercenario",PSY:"Psychic"
+  EA:"Elf Archer",EP:"Elf Principe",MC:"Mercenario",PSY:"Psychic",
+  TM:"TM",RT:"RT",MS:"MS",SK:"SK"
 };
 
 export const CLASS_COLORS = {
   WR:"#C94C4C",MG:"#9B59B6",WB:"#D4803A",WF:"#4CAF50",
-  EA:"#26A69A",EP:"#C9A84C",MC:"#3A6EA5",PSY:"#E87BBF"
+  EA:"#26A69A",EP:"#C9A84C",MC:"#3A6EA5",PSY:"#E87BBF",
+  TM:"#E67E22",RT:"#16A085",MS:"#8E44AD",SK:"#7F8C8D"
 };
 
 export const CULTIVOS = [
@@ -33,6 +35,7 @@ export const CLASS_MAP = {
   "ep":"EP","elfprincipe":"EP","clér":"EP","cler":"EP","clér.":"EP","cler.":"EP","clérigo":"EP","clerigo":"EP","cleriga":"EP","cleric":"EP",
   "mc":"MC","mercenario":"MC","mercenário":"MC","merc":"MC","merc.":"MC","assassin":"MC","assassino":"MC","sin":"MC",
   "psy":"PSY","psychic":"PSY","psíq":"PSY","psiq":"PSY","psíquico":"PSY","psiquico":"PSY",
+  "tm":"TM","rt":"RT","ms":"MS","sk":"SK",
 };
 
 export const DEFAULT_DATA = {

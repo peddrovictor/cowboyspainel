@@ -1,9 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getDatabase, ref, get, set, onValue } from "firebase/database";
 
-// ╔══════════════════════════════════════════════════════════════╗
-// ║  COWBOYS — Substitua com as credenciais do Firebase         ║
-// ╚══════════════════════════════════════════════════════════════╝
 const firebaseConfig = {
   apiKey: "AIzaSyD8f8zjLhy3pM0LkgUEkqMaqKL-ITe3CeM",
   authDomain: "cowboys-ac0fa.firebaseapp.com",
@@ -21,30 +18,17 @@ export const storage = {
   async get(key) {
     try {
       const snapshot = await get(ref(db, key));
-      if (snapshot.exists()) {
-        return { value: JSON.stringify(snapshot.val()) };
-      }
+      if (snapshot.exists()) return { value: JSON.stringify(snapshot.val()) };
       return null;
-    } catch (e) {
-      console.error("Firebase get error:", e);
-      return null;
-    }
+    } catch (e) { console.error("Firebase get error:", e); return null; }
   },
-
   async save(key, data) {
-    try {
-      await set(ref(db, key), data);
-    } catch (e) {
-      console.error("Firebase set error:", e);
-    }
+    try { await set(ref(db, key), data); }
+    catch (e) { console.error("Firebase set error:", e); }
   },
-
   subscribe(key, callback) {
-    const unsubscribe = onValue(ref(db, key), (snapshot) => {
-      if (snapshot.exists()) {
-        callback(snapshot.val());
-      }
+    return onValue(ref(db, key), (snapshot) => {
+      if (snapshot.exists()) callback(snapshot.val());
     });
-    return unsubscribe;
   }
 };
